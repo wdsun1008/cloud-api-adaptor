@@ -374,6 +374,13 @@ func (d *VXLAN) getLink() netlink.Link {
 	}
 }
 
+type WireGuard struct{}
+
+func (w *WireGuard) getLink() netlink.Link {
+
+	return &netlink.Wireguard{}
+}
+
 func (ns *namespace) LinkFind(name string) (Link, error) {
 
 	nlLinks, err := ns.handle.LinkList()
@@ -391,7 +398,7 @@ func (ns *namespace) LinkFind(name string) (Link, error) {
 		}
 	}
 
-	return nil, fmt.Errorf("failed to find interface %q on netns %s", name, ns.path)
+	return nil, fmt.Errorf("failed to find interface %q on netns %s: %w", name, ns.path, os.ErrNotExist)
 }
 
 func (ns *namespace) LinkList() ([]Link, error) {
@@ -441,6 +448,7 @@ type Route struct {
 	Device      string
 	Priority    int
 	Table       int
+	TableUnspec bool
 	Type        int
 	Protocol    RouteProtocol
 	Scope       RouteScope
@@ -506,6 +514,10 @@ func (ns *namespace) routeListFiltered(filter *Route) ([]*netlink.Route, error) 
 	}
 	if filter.Table != 0 {
 		nlRoute.Table = filter.Table
+		filterMask |= netlink.RT_FILTER_TABLE
+	}
+	if filter.TableUnspec {
+		nlRoute.Table = unix.RT_TABLE_UNSPEC
 		filterMask |= netlink.RT_FILTER_TABLE
 	}
 	if filter.Type != 0 {
@@ -742,6 +754,7 @@ type Rule struct {
 	IifName  string
 	Priority int
 	Table    int
+	Invert   bool
 }
 
 // RuleAdd adds a new rule in the routing policy database
@@ -751,6 +764,7 @@ func (ns *namespace) RuleAdd(rule *Rule) error {
 	nlRule.IifName = rule.IifName
 	nlRule.Priority = rule.Priority
 	nlRule.Table = rule.Table
+	nlRule.Invert = rule.Invert
 
 	if err := ns.handle.RuleAdd(nlRule); err != nil {
 		return fmt.Errorf("failed to add a rule: %w", err)
