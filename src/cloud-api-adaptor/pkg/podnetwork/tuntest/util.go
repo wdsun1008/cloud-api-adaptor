@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/avast/retry-go/v4"
 	"github.com/confidential-containers/cloud-api-adaptor/src/cloud-api-adaptor/pkg/util/netops"
 )
 
@@ -253,13 +254,19 @@ func ConnectToHTTPServer(t *testing.T, ns netops.Namespace, addr, localAddr neti
 			return err
 		}
 
-		ctx, cancel := context.WithTimeout(req.Context(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(req.Context(), 10*time.Second)
 		defer cancel()
 
 		req = req.WithContext(ctx)
 
-		res, err := client.Do(req)
-		if err != nil {
+		var res *http.Response
+		if err := retry.Do(func() (err error) {
+			res, err = client.Do(req)
+			return err
+		},
+			retry.Attempts(3),
+			retry.MaxDelay(3*time.Second),
+		); err != nil {
 			return fmt.Errorf("failed to get an http response at %s from http://%s : %v", ns.Path(), addr, err)
 		}
 		body, err := io.ReadAll(res.Body)

@@ -55,6 +55,10 @@ func NewWorkerNode(networkConfig *tunneler.NetworkConfig) (WorkerNode, error) {
 		return nil, fmt.Errorf("internal error: Configure is not defined: %T", t)
 	}
 
+	if err := tun.Initialize(networkConfig); err != nil {
+		return nil, err
+	}
+
 	wn := &workerNode{
 		NetworkConfig: networkConfig,
 		tunneler:      tun,
@@ -215,7 +219,7 @@ func (n *workerNode) Inspect(nsPath string) (*tunneler.Config, error) {
 		config.Neighbors = append(config.Neighbors, n)
 	}
 
-	if err := n.tunneler.Configure(n.NetworkConfig, config); err != nil {
+	if err := n.tunneler.Configure(config); err != nil {
 		return nil, err
 	}
 

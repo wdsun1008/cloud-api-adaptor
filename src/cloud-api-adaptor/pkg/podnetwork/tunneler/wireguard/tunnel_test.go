@@ -1,7 +1,7 @@
 // (C) Copyright IBM Corp. 2022.
 // SPDX-License-Identifier: Apache-2.0
 
-package vxlan
+package wireguard
 
 import (
 	"testing"
@@ -10,16 +10,14 @@ import (
 	"github.com/confidential-containers/cloud-api-adaptor/src/cloud-api-adaptor/pkg/podnetwork/tuntest"
 )
 
-func TestVXLAN(t *testing.T) {
+func TestWireGuard(t *testing.T) {
 
 	networkConfig := &tunneler.NetworkConfig{
-		TunnelType: "vxlan",
-		VXLAN: tunneler.VXLANConfig{
-			Port:  4789,
-			MinID: 555000,
+		TunnelType: "wireguard",
+		WireGuard: tunneler.WireGuardConfig{
+			Port: 51820,
 		},
 	}
 
-	tuntest.RunTunnelTest(t, "vxlan", NewWorkerNodeTunneler, NewPodNodeTunneler, networkConfig)
-
+	tuntest.RunTunnelTest(t, "wireguard", NewWorkerNodeTunneler, NewPodNodeTunneler, networkConfig)
 }

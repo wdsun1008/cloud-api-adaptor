@@ -5,15 +5,20 @@ package tunneler
 
 import "strings"
 
+const DefaultNetworkNamespaceName = "peerpods"
+
 type TunnelerConfigurator interface {
 	Tunneler
-	Configure(*NetworkConfig, *Config) error
+	Initialize(*NetworkConfig) error
+	Configure(*Config) error
 }
 
 type NetworkConfig struct {
 	TunnelType          string
 	HostInterface       string
+	Namespace           string
 	VXLAN               VXLANConfig
+	WireGuard           WireGuardConfig
 	ExternalNetViaPodVM bool
 	PodSubnetCIDRs      SubnetCIDRs
 }
@@ -21,6 +26,11 @@ type NetworkConfig struct {
 type VXLANConfig struct {
 	Port  int
 	MinID int
+}
+
+type WireGuardConfig struct {
+	Port int
+	MTU  int
 }
 
 type SubnetCIDRs []string

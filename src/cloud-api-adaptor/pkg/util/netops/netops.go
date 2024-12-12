@@ -381,6 +381,21 @@ func (w *WireGuard) getLink() netlink.Link {
 	return &netlink.Wireguard{}
 }
 
+type Macvlan struct {
+	Parent Link
+}
+
+func (m *Macvlan) getLink() netlink.Link {
+
+	parentIndex := m.Parent.(*link).nlLink.Attrs().Index
+
+	return &netlink.Macvlan{
+		LinkAttrs: netlink.LinkAttrs{
+			ParentIndex: parentIndex,
+		},
+	}
+}
+
 func (ns *namespace) LinkFind(name string) (Link, error) {
 
 	nlLinks, err := ns.handle.LinkList()

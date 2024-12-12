@@ -24,16 +24,26 @@ const (
 )
 
 type workerNodeTunneler struct {
+	port  int
+	minID int
 }
 
 func NewWorkerNodeTunneler() (tunneler.Tunneler, error) {
 	return &workerNodeTunneler{}, nil
 }
 
-func (t *workerNodeTunneler) Configure(n *tunneler.NetworkConfig, config *tunneler.Config) error {
+func (t *workerNodeTunneler) Initialize(n *tunneler.NetworkConfig) error {
 
-	config.VXLANPort = n.VXLAN.Port
-	config.VXLANID = n.VXLAN.MinID + config.Index
+	t.port = n.VXLAN.Port
+	t.minID = n.VXLAN.MinID
+
+	return nil
+}
+
+func (t *workerNodeTunneler) Configure(config *tunneler.Config) error {
+
+	config.VXLANPort = t.port
+	config.VXLANID = t.minID + config.Index
 
 	return nil
 }

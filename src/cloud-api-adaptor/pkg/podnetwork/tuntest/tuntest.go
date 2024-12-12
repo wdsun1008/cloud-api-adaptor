@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"path/filepath"
 	"testing"
 
 	testutils "github.com/confidential-containers/cloud-api-adaptor/src/cloud-api-adaptor/pkg/internal/testing"
@@ -41,8 +42,10 @@ func getIP(t *testing.T, addr string) netip.Addr {
 	return prefix.Addr()
 }
 
-func RunTunnelTest(t *testing.T, tunnelType string, newWorkerNodeTunneler, newPodNodeTunneler func() (tunneler.Tunneler, error), dedicated bool) {
+func RunTunnelTest(t *testing.T, tunnelType string, newWorkerNodeTunneler, newPodNodeTunneler func() (tunneler.Tunneler, error), networkConfig *tunneler.NetworkConfig) {
 	testutils.SkipTestIfNotRoot(t)
+
+	dedicated := networkConfig.HostInterface != ""
 
 	const (
 		gatewayIP           = "10.128.0.1"
@@ -93,9 +96,23 @@ func RunTunnelTest(t *testing.T, tunnelType string, newWorkerNodeTunneler, newPo
 	RouteAdd(t, workerNS, "", "10.10.254.1", "enc0")
 	AddrAdd(t, bridgeNS, "br0", "10.10.254.1/16")
 
+	workerNodeTunneler, _ := newWorkerNodeTunneler()
+
+	ppNS, _ := NewNamedNS(t, "test-peerpods")
+	defer DeleteNamedNS(t, ppNS)
+
+	networkConfigCopy := *networkConfig
+	networkConfigCopy.Namespace = filepath.Base(ppNS.Path())
+
+	if err := workerNS.Run(func() error {
+		return workerNodeTunneler.(tunneler.TunnelerConfigurator).Initialize(&networkConfigCopy)
+	}); err != nil {
+		t.Fatalf("Expect no error, got %v", err)
+	}
+
 	for i, pod := range pods {
 
-		pod.workerNodeTunneler, _ = newWorkerNodeTunneler()
+		pod.workerNodeTunneler = workerNodeTunneler
 		pod.podNodeTunneler, _ = newPodNodeTunneler()
 
 		pod.workerPodNS, _ = NewNamedNS(t, fmt.Sprintf("test-workerpod%d", i))
@@ -131,7 +148,7 @@ func RunTunnelTest(t *testing.T, tunnelType string, newWorkerNodeTunneler, newPo
 		pod.config = &tunneler.Config{
 			PodIP:         netip.MustParsePrefix(pod.podAddr),
 			PodHwAddr:     pod.podHwAddr,
-			Routes:        []*tunneler.Route{{GW: netip.MustParseAddr("10.128.0.1")}},
+			Routes:        []*tunneler.Route{{Dst: netip.MustParsePrefix("0.0.0.0/0"), GW: netip.MustParseAddr("10.128.0.1")}},
 			InterfaceName: "eth0",
 			MTU:           1500,
 			TunnelType:    tunnelType,
@@ -139,9 +156,14 @@ func RunTunnelTest(t *testing.T, tunnelType string, newWorkerNodeTunneler, newPo
 			Index:         i,
 		}
 
-		if tunnelType == "vxlan" {
-			pod.config.VXLANPort = 4789     // vxlan.DefaultVXLANPort
-			pod.config.VXLANID = 555000 + i // vxlan.DefaultVXLANMinID + index
+		switch tunnelType {
+		case "vxlan":
+			pod.config.VXLANPort = networkConfig.VXLAN.Port    // vxlan.DefaultVXLANPort
+			pod.config.VXLANID = networkConfig.VXLAN.MinID + i // vxlan.DefaultVXLANMinID + index
+		case "wireguard":
+			pod.config.WireGuard = &tunneler.WireGuard{
+				Port: networkConfig.WireGuard.Port,
+			}
 		}
 
 		podNodeIPs := []netip.Addr{getIP(t, pod.podNodePrimaryAddr)}
@@ -156,6 +178,9 @@ func RunTunnelTest(t *testing.T, tunnelType string, newWorkerNodeTunneler, newPo
 		}
 
 		if err := workerNS.Run(func() error {
+			if err := pod.workerNodeTunneler.(tunneler.TunnelerConfigurator).Configure(pod.config); err != nil {
+				return err
+			}
 			return pod.workerNodeTunneler.Setup(pod.workerPodNS.Path(), podNodeIPs, pod.config)
 
 		}); err != nil {

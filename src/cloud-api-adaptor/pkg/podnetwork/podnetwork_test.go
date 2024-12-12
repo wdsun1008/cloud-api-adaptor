@@ -22,7 +22,11 @@ func newMockWorkerNodeTunneler() (tunneler.Tunneler, error) {
 	return &mockWorkerNodeTunneler{}, nil
 }
 
-func (t *mockWorkerNodeTunneler) Configure(n *tunneler.NetworkConfig, config *tunneler.Config) error {
+func (t *mockWorkerNodeTunneler) Initialize(n *tunneler.NetworkConfig) error {
+	return nil
+}
+
+func (t *mockWorkerNodeTunneler) Configure(config *tunneler.Config) error {
 	return nil
 }
 

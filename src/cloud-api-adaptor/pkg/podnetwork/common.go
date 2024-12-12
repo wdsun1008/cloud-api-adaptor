@@ -15,6 +15,7 @@ import (
 
 	"github.com/confidential-containers/cloud-api-adaptor/src/cloud-api-adaptor/pkg/podnetwork/tunneler"
 	"github.com/confidential-containers/cloud-api-adaptor/src/cloud-api-adaptor/pkg/podnetwork/tunneler/vxlan"
+	"github.com/confidential-containers/cloud-api-adaptor/src/cloud-api-adaptor/pkg/podnetwork/tunneler/wireguard"
 	"github.com/confidential-containers/cloud-api-adaptor/src/cloud-api-adaptor/pkg/util/netops"
 )
 
@@ -23,6 +24,7 @@ var ErrNoSecondaryInterface = errors.New("no valid secondary interface found")
 
 func init() {
 	tunneler.Register("vxlan", vxlan.NewWorkerNodeTunneler, vxlan.NewPodNodeTunneler)
+	tunneler.Register("wireguard", wireguard.NewWorkerNodeTunneler, wireguard.NewPodNodeTunneler)
 }
 
 // extractInterfaceNumber splits the interface name into prefix and numeric parts
