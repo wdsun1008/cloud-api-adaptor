@@ -221,6 +221,7 @@ func TestDecodeCloudVolumeAnnotations(t *testing.T) {
 		"missing readonly": `{"vol-0":{"mount_point":"/workspace","fs_type":"ext4","lun":"0","disk_id":"d-one"}}`,
 		"duplicate target": `{"vol-0":{"mount_point":"/workspace","fs_type":"ext4","lun":"0","disk_id":"d-one","readonly":false},` +
 			`"vol-1":{"mount_point":"/workspace","fs_type":"ext4","lun":"1","disk_id":"d-two","readonly":false}}`,
+		"incomplete encryption": `{"vol-0":{"mount_point":"/workspace","fs_type":"ext4","lun":"0","disk_id":"d-one","readonly":false,"encrypt_type":"luks2"}}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := DecodeCloudVolumeAnnotations(annotation)

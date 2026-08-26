@@ -129,6 +129,25 @@ func TestConfigSetup(t *testing.T) {
 		assert.Nil(t, cfg.tlsConfig)
 	})
 
+	t.Run("requires CryptPilot from environment", func(t *testing.T) {
+		t.Setenv("CRYPTPILOT_REQUIRED", "true")
+		_, cleanup := setupTestConfig(t, `{"pod-namespace": "test-ns"}`)
+		defer cleanup()
+
+		cfg := &Config{}
+		starter, err := cfg.Setup()
+		require.NoError(t, err)
+		assert.NotNil(t, starter)
+		assert.True(t, cfg.requireCryptpilot)
+	})
+
+	t.Run("rejects invalid CryptPilot environment", func(t *testing.T) {
+		t.Setenv("CRYPTPILOT_REQUIRED", "sometimes")
+		cfg := &Config{}
+		_, err := cfg.Setup()
+		assert.ErrorContains(t, err, "invalid CRYPTPILOT_REQUIRED")
+	})
+
 	t.Run("config with tls-skip-verify flag", func(t *testing.T) {
 		_, cleanup := setupTestConfig(t, `{"pod-namespace": "test-ns"}`,
 			"-tls-skip-verify",

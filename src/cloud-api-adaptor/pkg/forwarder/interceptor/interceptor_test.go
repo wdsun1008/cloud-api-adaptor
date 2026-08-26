@@ -102,38 +102,6 @@ func TestNewInterceptor(t *testing.T) {
 	})
 }
 
-func TestIsTargetPath(t *testing.T) {
-	t.Run("returns false when target path is empty", func(t *testing.T) {
-		path := "/path/to/target"
-		assert.False(t, isTargetPath(path, ""))
-	})
-
-	t.Run("returns false when both paths are empty", func(t *testing.T) {
-		assert.False(t, isTargetPath("", ""))
-	})
-
-	t.Run("returns false when paths do not match", func(t *testing.T) {
-		path := "/path/to/target"
-		assert.False(t, isTargetPath(path, "mock path"))
-		assert.False(t, isTargetPath(path, "/different/path"))
-	})
-
-	t.Run("returns true when paths match exactly", func(t *testing.T) {
-		path := "/path/to/target"
-		assert.True(t, isTargetPath(path, "/path/to/target"))
-	})
-
-	t.Run("returns false when path is empty but target is not", func(t *testing.T) {
-		assert.False(t, isTargetPath("", "/path/to/target"))
-	})
-
-	t.Run("handles paths with special characters", func(t *testing.T) {
-		path := "/path/to/target-with_special.chars"
-		assert.True(t, isTargetPath(path, path))
-		assert.False(t, isTargetPath(path, "/path/to/target"))
-	})
-}
-
 func TestInterceptorCreateContainer(t *testing.T) {
 	t.Run("adds network namespace to container spec", func(t *testing.T) {
 		nsPath := "/run/netns/podns"
@@ -492,116 +460,6 @@ func TestInterceptorDestroySandbox(t *testing.T) {
 	})
 }
 
-func TestInterceptorWithAnnotations(t *testing.T) {
-	t.Run("handles volume target path annotation without matching mount", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		// Create annotation path but use different mount source to avoid device wait
-		annotationPath := filepath.Join(tmpDir, "annotation-volume")
-		mountSource := filepath.Join(tmpDir, "actual-mount")
-		require.NoError(t, os.MkdirAll(mountSource, 0o755))
-
-		mock := &mockRedirector{}
-		i := &interceptor{
-			Redirector: mock,
-			nsPath:     "/run/netns/podns",
-		}
-
-		req := &pb.CreateContainerRequest{
-			ContainerId: "test-container",
-			OCI: &pb.Spec{
-				Linux: &pb.Linux{
-					Namespaces: []*pb.LinuxNamespace{},
-				},
-				Annotations: map[string]string{
-					volumeTargetPathKey: annotationPath,
-				},
-				Mounts: []*pb.Mount{
-					{
-						Source: mountSource,
-						Type:   "bind",
-					},
-				},
-			},
-		}
-
-		ctx := context.Background()
-		_, err := i.CreateContainer(ctx, req)
-
-		require.NoError(t, err)
-		assert.True(t, mock.createContainerCalled)
-	})
-
-	t.Run("handles empty volume target path annotation", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		mountSource := filepath.Join(tmpDir, "volume")
-		require.NoError(t, os.MkdirAll(mountSource, 0o755))
-
-		mock := &mockRedirector{}
-		i := &interceptor{
-			Redirector: mock,
-			nsPath:     "/run/netns/podns",
-		}
-
-		req := &pb.CreateContainerRequest{
-			ContainerId: "test-container",
-			OCI: &pb.Spec{
-				Linux: &pb.Linux{
-					Namespaces: []*pb.LinuxNamespace{},
-				},
-				Annotations: map[string]string{
-					volumeTargetPathKey: "",
-				},
-				Mounts: []*pb.Mount{
-					{
-						Source: mountSource,
-						Type:   "bind",
-					},
-				},
-			},
-		}
-
-		ctx := context.Background()
-		_, err := i.CreateContainer(ctx, req)
-
-		require.NoError(t, err)
-		assert.True(t, mock.createContainerCalled)
-	})
-
-	t.Run("handles missing volume target path annotation", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		mountSource := filepath.Join(tmpDir, "volume")
-		require.NoError(t, os.MkdirAll(mountSource, 0o755))
-
-		mock := &mockRedirector{}
-		i := &interceptor{
-			Redirector: mock,
-			nsPath:     "/run/netns/podns",
-		}
-
-		req := &pb.CreateContainerRequest{
-			ContainerId: "test-container",
-			OCI: &pb.Spec{
-				Linux: &pb.Linux{
-					Namespaces: []*pb.LinuxNamespace{},
-				},
-				Annotations: map[string]string{},
-				Mounts: []*pb.Mount{
-					{
-						Source: mountSource,
-						Type:   "bind",
-					},
-				},
-			},
-		}
-
-		ctx := context.Background()
-		_, err := i.CreateContainer(ctx, req)
-
-		require.NoError(t, err)
-		assert.True(t, mock.createContainerCalled)
-	})
-}
-
 func TestInterceptorCreateContainerWithMountErrors(t *testing.T) {
 	t.Run("handles mount source creation error when MkdirAll fails", func(t *testing.T) {
 		// Create a temp directory with restricted permissions to trigger MkdirAll failure
@@ -883,83 +741,6 @@ func TestInterceptorCreateSandboxWithDNS(t *testing.T) {
 	})
 }
 
-func TestInterceptorWithComplexAnnotations(t *testing.T) {
-	t.Run("handles annotation with whitespace in paths", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		path1 := filepath.Join(tmpDir, "path1")
-		path2 := filepath.Join(tmpDir, "path2")
-		mountSource := filepath.Join(tmpDir, "mount")
-		require.NoError(t, os.MkdirAll(mountSource, 0o755))
-
-		mock := &mockRedirector{}
-		i := &interceptor{
-			Redirector: mock,
-			nsPath:     "/run/netns/podns",
-		}
-
-		req := &pb.CreateContainerRequest{
-			ContainerId: "test-container",
-			OCI: &pb.Spec{
-				Linux: &pb.Linux{
-					Namespaces: []*pb.LinuxNamespace{},
-				},
-				Annotations: map[string]string{
-					volumeTargetPathKey: path1 + " , " + path2 + " ",
-				},
-				Mounts: []*pb.Mount{
-					{
-						Source: mountSource,
-						Type:   "bind",
-					},
-				},
-			},
-		}
-
-		ctx := context.Background()
-		_, err := i.CreateContainer(ctx, req)
-
-		require.NoError(t, err)
-		assert.True(t, mock.createContainerCalled)
-	})
-
-	t.Run("handles annotation with single path and comma", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		annotationPath := filepath.Join(tmpDir, "annotation")
-		mountSource := filepath.Join(tmpDir, "mount")
-		require.NoError(t, os.MkdirAll(mountSource, 0o755))
-
-		mock := &mockRedirector{}
-		i := &interceptor{
-			Redirector: mock,
-			nsPath:     "/run/netns/podns",
-		}
-
-		req := &pb.CreateContainerRequest{
-			ContainerId: "test-container",
-			OCI: &pb.Spec{
-				Linux: &pb.Linux{
-					Namespaces: []*pb.LinuxNamespace{},
-				},
-				Annotations: map[string]string{
-					volumeTargetPathKey: annotationPath + ",",
-				},
-				Mounts: []*pb.Mount{
-					{
-						Source: mountSource,
-						Type:   "bind",
-					},
-				},
-			},
-		}
-
-		ctx := context.Background()
-		_, err := i.CreateContainer(ctx, req)
-
-		require.NoError(t, err)
-		assert.True(t, mock.createContainerCalled)
-	})
-}
-
 func TestCloudVolumesJSONParseError(t *testing.T) {
 	t.Run("corrupt JSON annotation returns error instead of silently skipping", func(t *testing.T) {
 		mock := &mockRedirector{}
@@ -1229,25 +1010,6 @@ func TestFindDataDiskBySysfsHCTL(t *testing.T) {
 		assert.Error(t, err)
 	})
 }
-
-func TestIsTargetPathEdgeCases(t *testing.T) {
-	t.Run("handles paths with trailing slashes", func(t *testing.T) {
-		assert.False(t, isTargetPath("/path/to/target/", "/path/to/target"))
-		assert.False(t, isTargetPath("/path/to/target", "/path/to/target/"))
-	})
-
-	t.Run("handles similar but different paths", func(t *testing.T) {
-		assert.False(t, isTargetPath("/path/to/target", "/path/to/target2"))
-		assert.False(t, isTargetPath("/path/to/target2", "/path/to/target"))
-	})
-
-	t.Run("handles paths with dots", func(t *testing.T) {
-		path := "/path/to/../target"
-		assert.True(t, isTargetPath(path, path))
-		assert.False(t, isTargetPath(path, "/path/target"))
-	})
-}
-
 func TestCloudVolumeAnnotation_WithEncryption(t *testing.T) {
 	jsonStr := `{
 		"vol-0": {
@@ -1334,23 +1096,6 @@ func TestSecureMountResponse_ProtoRoundTrip(t *testing.T) {
 	assert.Equal(t, "/run/cloud-volumes/vol-0", decoded.GetMountPath())
 }
 
-func TestCloudMounts_EncryptedFlagTracking(t *testing.T) {
-	inter := &interceptor{
-		cloudMounts: []cloudMount{
-			{path: "/run/cloud-volumes/vol-0", encrypted: false},
-			{path: "/run/cloud-volumes/vol-1", encrypted: true, mapperName: "caa-vol-1"},
-		},
-	}
-
-	assert.Len(t, inter.cloudMounts, 2)
-	assert.False(t, inter.cloudMounts[0].encrypted)
-	assert.Equal(t, "", inter.cloudMounts[0].mapperName)
-	assert.True(t, inter.cloudMounts[1].encrypted)
-	assert.Equal(t, "caa-vol-1", inter.cloudMounts[1].mapperName)
-	assert.Equal(t, "/run/cloud-volumes/vol-0", inter.cloudMounts[0].path)
-	assert.Equal(t, "/run/cloud-volumes/vol-1", inter.cloudMounts[1].path)
-}
-
 func TestValidateEncryptParams_RejectsEmptyKeyID(t *testing.T) {
 	_, err := validateEncryptParams("LUKS", "")
 	require.Error(t, err)
@@ -1369,11 +1114,6 @@ func TestValidateEncryptParams_AcceptsValidTypes(t *testing.T) {
 		require.NoError(t, err, "encrypt type %q should be accepted", et)
 		assert.Equal(t, "luks2", normalized, "CDH requires encryptionType luks2; %q should map to luks2", et)
 	}
-}
-
-func TestFindMapperForMountPoint(t *testing.T) {
-	result := findMapperForMountPoint("/nonexistent/path")
-	assert.Equal(t, "", result, "should return empty for non-mounted path")
 }
 
 func TestIsLuks(t *testing.T) {
@@ -1424,4 +1164,13 @@ func TestIsLuks(t *testing.T) {
 		require.NoError(t, err)
 		assert.True(t, result)
 	})
+}
+
+func TestSecureMountReadOnlyRefusesUninitializedDevice(t *testing.T) {
+	device := filepath.Join(t.TempDir(), "plain-device")
+	require.NoError(t, os.WriteFile(device, make([]byte, 512), 0o600))
+
+	err := secureMount(context.Background(), device, "/run/cloud-volumes/vol-0", "ext4",
+		"luks2", "default/key/volume", "caa-vol-0", true, []string{"ro"})
+	require.ErrorContains(t, err, "not initialized")
 }

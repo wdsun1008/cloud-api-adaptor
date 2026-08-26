@@ -9,6 +9,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strconv"
 
 	"github.com/confidential-containers/cloud-api-adaptor/src/cloud-api-adaptor/cmd"
 	daemon "github.com/confidential-containers/cloud-api-adaptor/src/cloud-api-adaptor/pkg/forwarder"
@@ -29,6 +30,7 @@ type Config struct {
 	kataAgentSocketPath string
 	podNamespace        string
 	HostInterface       string
+	requireCryptpilot   bool
 }
 
 func load(path string, obj interface{}) error {
@@ -52,6 +54,13 @@ func (cfg *Config) Setup() (cmd.Starter, error) {
 		tlsConfig   tlsutil.TLSConfig
 		services    []cmd.Service
 	)
+	if value, exists := os.LookupEnv("CRYPTPILOT_REQUIRED"); exists && value != "" {
+		required, err := strconv.ParseBool(value)
+		if err != nil {
+			return nil, fmt.Errorf("invalid CRYPTPILOT_REQUIRED value %q: %w", value, err)
+		}
+		cfg.requireCryptpilot = required
+	}
 
 	cmd.Parse(programName, os.Args, func(flags *flag.FlagSet) {
 		flags.BoolVar(&showVersion, "version", false, "Show version")
@@ -65,6 +74,7 @@ func (cfg *Config) Setup() (cmd.Starter, error) {
 		flags.StringVar(&tlsConfig.KeyFile, "cert-key", "", "cert key")
 		flags.BoolVar(&tlsConfig.SkipVerify, "tls-skip-verify", false, "Skip TLS certificate verification - use it only for testing")
 		flags.BoolVar(&disableTLS, "disable-tls", false, "Disable TLS encryption - use it only for testing")
+		flags.BoolVar(&cfg.requireCryptpilot, "require-cryptpilot", cfg.requireCryptpilot, "Require CryptPilot for guest data volumes")
 	})
 
 	cmd.ShowVersion(programName)
@@ -81,7 +91,7 @@ func (cfg *Config) Setup() (cmd.Starter, error) {
 		cfg.tlsConfig = &tlsConfig
 	}
 
-	interceptor := interceptor.NewInterceptor(cfg.kataAgentSocketPath, cfg.podNamespace)
+	interceptor := interceptor.NewInterceptorWithCryptpilot(cfg.kataAgentSocketPath, cfg.podNamespace, cfg.requireCryptpilot)
 
 	podNode := podnetwork.NewPodNode(cfg.podNamespace, cfg.HostInterface, cfg.daemonConfig.PodNetwork)
 

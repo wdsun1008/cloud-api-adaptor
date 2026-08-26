@@ -154,6 +154,19 @@ func DecodeCloudVolumeAnnotations(data string) (map[string]CloudVolumeAnnotation
 		if err := validateFSGroup(volume.FSGroup); err != nil {
 			return nil, fmt.Errorf("cloud volume %s has invalid fs_group: %w", name, err)
 		}
+		if (volume.EncryptType == "") != (volume.KeyID == "") {
+			return nil, fmt.Errorf("cloud volume %s must set encrypt_type and key_id together", name)
+		}
+		if volume.EncryptType != "" {
+			switch strings.ToLower(volume.EncryptType) {
+			case "luks", "luks2":
+			default:
+				return nil, fmt.Errorf("cloud volume %s has unsupported encrypt_type %q", name, volume.EncryptType)
+			}
+			if strings.TrimSpace(volume.KeyID) != volume.KeyID || strings.ContainsAny(volume.KeyID, "\t\r\n") {
+				return nil, fmt.Errorf("cloud volume %s has invalid key_id", name)
+			}
+		}
 		if _, exists := seenDisks[volume.DiskID]; exists {
 			return nil, fmt.Errorf("cloud volume %s duplicates disk_id %q", name, volume.DiskID)
 		}
