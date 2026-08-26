@@ -5,6 +5,7 @@ package interceptor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -449,6 +450,9 @@ func detectCloudProvider() string {
 // (SCSI rescan, udev rules), so the entire detection is retried.
 func findDataDiskDevice(lunIdx int, diskID string) (string, error) {
 	provider := detectCloudProvider()
+	if isAlibabaDiskIdentity(diskID) {
+		provider = "alibabacloud"
+	}
 	logger.Printf("Cloud provider detected: %s (LUN %d, diskID %s)", provider, lunIdx, diskID)
 
 	maxAttempts := 15
@@ -464,10 +468,11 @@ func findDataDiskDevice(lunIdx int, diskID string) (string, error) {
 		}
 	}
 
-	if provider == "azure" {
+	if provider == "azure" || provider == "alibabacloud" {
 		triggerUdevRescan()
 	}
 
+	var lastErr error
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		if attempt > 1 {
 			logger.Printf("Retry %d/%d for LUN %d...", attempt, maxAttempts, lunIdx)
@@ -475,6 +480,15 @@ func findDataDiskDevice(lunIdx int, diskID string) (string, error) {
 		}
 
 		switch provider {
+		case "alibabacloud":
+			if dev, err := findAlibabaDataDisk(diskID); err == nil {
+				return dev, nil
+			} else {
+				lastErr = err
+				if errors.Is(err, errAlibabaDiskIDInvalid) || errors.Is(err, errAlibabaDiskAmbiguous) {
+					return "", err
+				}
+			}
 		case "azure":
 			if dev, err := findAzureDataDisk(lunIdx); err == nil {
 				return dev, nil
@@ -489,12 +503,17 @@ func findDataDiskDevice(lunIdx int, diskID string) (string, error) {
 			}
 		}
 
-		if dev, err := findDataDiskBySysfsHCTL(lunIdx); err == nil {
-			return dev, nil
+		if provider != "alibabacloud" {
+			if dev, err := findDataDiskBySysfsHCTL(lunIdx); err == nil {
+				return dev, nil
+			}
 		}
 	}
 
 	dumpBlockDeviceDiagnostics()
+	if lastErr != nil {
+		return "", fmt.Errorf("no data disk found for LUN %d (provider=%s) after %d attempts: %w", lunIdx, provider, maxAttempts, lastErr)
+	}
 	return "", fmt.Errorf("no data disk found for LUN %d (provider=%s) after %d attempts", lunIdx, provider, maxAttempts)
 }
 
