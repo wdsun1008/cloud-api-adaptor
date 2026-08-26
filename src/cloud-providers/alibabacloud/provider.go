@@ -4,6 +4,8 @@
 package alibabacloud
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/base64"
 	"errors"
@@ -30,12 +32,38 @@ import (
 var logger = log.New(log.Writer(), "[adaptor/cloud/alibabacloud] ", log.LstdFlags|log.Lmsgprefix)
 
 const (
-	maxInstanceNameLen = 63
+	maxInstanceNameLen      = 63
+	maxUserDataPayloadBytes = 16 * 1024
 
 	EnvRoleArn         = "ALIBABA_CLOUD_ROLE_ARN"
 	EnvOidcProviderArn = "ALIBABA_CLOUD_OIDC_PROVIDER_ARN"
 	EnvOidcTokenFile   = "ALIBABA_CLOUD_OIDC_TOKEN_FILE"
 )
+
+func encodeUserData(data string) (string, error) {
+	payload := []byte(data)
+	if len(payload) > maxUserDataPayloadBytes {
+		var compressed bytes.Buffer
+		writer, err := gzip.NewWriterLevel(&compressed, gzip.BestCompression)
+		if err != nil {
+			return "", fmt.Errorf("initialize Alibaba Cloud user data compression: %w", err)
+		}
+		if _, err := writer.Write(payload); err != nil {
+			return "", fmt.Errorf("compress Alibaba Cloud user data: %w", err)
+		}
+		if err := writer.Close(); err != nil {
+			return "", fmt.Errorf("finish Alibaba Cloud user data compression: %w", err)
+		}
+		payload = compressed.Bytes()
+	}
+	if len(payload) > maxUserDataPayloadBytes {
+		return "", fmt.Errorf(
+			"Alibaba Cloud user data is %d bytes after compression; maximum is %d bytes",
+			len(payload), maxUserDataPayloadBytes)
+	}
+
+	return base64.StdEncoding.EncodeToString(payload), nil
+}
 
 var (
 	instanceCleanupTimeout      = 10 * time.Minute
@@ -232,8 +260,10 @@ func (p *alibabaCloudProvider) CreateInstance(ctx context.Context, podName, sand
 		return nil, err
 	}
 
-	//Convert userData to base64
-	b64EncData := base64.StdEncoding.EncodeToString([]byte(cloudConfigData))
+	b64EncData, err := encodeUserData(cloudConfigData)
+	if err != nil {
+		return nil, err
+	}
 
 	instanceType, err := p.selectInstanceType(ctx, spec)
 	if err != nil {

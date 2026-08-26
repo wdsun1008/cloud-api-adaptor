@@ -1,9 +1,12 @@
 package userdata
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -35,6 +38,7 @@ const (
 	// Ref: https://www.alibabacloud.com/help/en/ecs/user-guide/customize-the-initialization-configuration-for-an-instance
 	AlibabaCloudImdsURL         = "http://100.100.100.200/latest/dynamic/instance-identity/document"
 	AlibabaCloudUserDataImdsURL = "http://100.100.100.200/latest/user-data"
+	maxAlibabaCloudUserDataSize = 1024 * 1024
 )
 
 var logger = log.New(log.Writer(), "[userdata/provision] ", log.LstdFlags|log.Lmsgprefix)
@@ -124,7 +128,37 @@ type AlibabaCloudDataProvider struct{ DefaultRetry }
 func (a AlibabaCloudDataProvider) GetUserData(ctx context.Context) ([]byte, error) {
 	url := AlibabaCloudUserDataImdsURL
 	logger.Printf("provider: AlibabaCloud, userDataUrl: %s\n", url)
-	return imdsGet(ctx, url, false, nil)
+	data, err := imdsGet(ctx, url, false, nil)
+	if err != nil {
+		return nil, err
+	}
+	return decodeAlibabaCloudUserData(data)
+}
+
+func decodeAlibabaCloudUserData(data []byte) ([]byte, error) {
+	if len(data) > maxAlibabaCloudUserDataSize {
+		return nil, fmt.Errorf("Alibaba Cloud user data exceeds %d bytes", maxAlibabaCloudUserDataSize)
+	}
+	if len(data) < 2 || data[0] != 0x1f || data[1] != 0x8b {
+		return data, nil
+	}
+
+	reader, err := gzip.NewReader(bytes.NewReader(data))
+	if err != nil {
+		return nil, fmt.Errorf("open compressed Alibaba Cloud user data: %w", err)
+	}
+	decoded, readErr := io.ReadAll(io.LimitReader(reader, maxAlibabaCloudUserDataSize+1))
+	closeErr := reader.Close()
+	if readErr != nil {
+		return nil, fmt.Errorf("decompress Alibaba Cloud user data: %w", readErr)
+	}
+	if closeErr != nil {
+		return nil, fmt.Errorf("finish Alibaba Cloud user data decompression: %w", closeErr)
+	}
+	if len(decoded) > maxAlibabaCloudUserDataSize {
+		return nil, fmt.Errorf("decompressed Alibaba Cloud user data exceeds %d bytes", maxAlibabaCloudUserDataSize)
+	}
+	return decoded, nil
 }
 
 func newProvider(ctx context.Context) (UserDataProvider, error) {
