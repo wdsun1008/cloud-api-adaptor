@@ -22,6 +22,7 @@ import (
 	"github.com/confidential-containers/cloud-api-adaptor/src/cloud-api-adaptor/pkg/forwarder"
 	"github.com/confidential-containers/cloud-api-adaptor/src/cloud-api-adaptor/pkg/podnetwork"
 	"github.com/confidential-containers/cloud-api-adaptor/src/cloud-api-adaptor/pkg/podnetwork/tunneler"
+	"github.com/confidential-containers/cloud-api-adaptor/src/cloud-api-adaptor/pkg/util"
 	"github.com/confidential-containers/cloud-api-adaptor/src/cloud-api-adaptor/pkg/util/tlsutil"
 	provider "github.com/confidential-containers/cloud-api-adaptor/src/cloud-providers"
 	"github.com/confidential-containers/cloud-api-adaptor/src/cloud-providers/util/cloudinit"
@@ -85,10 +86,12 @@ func (p *mockProxy) CAService() tlsutil.CAService {
 }
 
 type mockProxyFactory struct {
-	podsDir string
+	podsDir       string
+	directVolumes *util.DirectVolumeResolution
 }
 
-func (f *mockProxyFactory) New(serverName, socketPath string) proxy.AgentProxy {
+func (f *mockProxyFactory) New(serverName, socketPath string, directVolumes *util.DirectVolumeResolution) proxy.AgentProxy {
+	f.directVolumes = directVolumes
 	return &mockProxy{
 		socketPath: socketPath,
 		readyCh:    make(chan struct{}),
@@ -150,6 +153,7 @@ func TestCloudService(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NotNil(t, res1)
 	assert.Contains(t, res1.AgentSocketPath, dir)
+	assert.NotNil(t, proxyFactory.directVolumes)
 
 	res2, err := s.StartVM(ctx, &pb.StartVMRequest{Id: sandboxID})
 

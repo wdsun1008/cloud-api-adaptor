@@ -193,8 +193,17 @@ func (s *cloudService) CreateVM(ctx context.Context, req *pb.CreateVMRequest) (r
 	// Get Pod VM image from annotations
 	image := util.GetImageFromAnnotation(req.Annotations)
 
-	// Get CSI volumes that need to be attached to the PodVM
-	csiVolumes := util.GetCSIVolumesForPod(req.Annotations)
+	// Resolve CSI metadata once so attachment and every later container request
+	// use the same immutable disk order and mount contract. Kata's remote
+	// hypervisor request does not forward the CRI sandbox UID, so resolve it
+	// lazily from the API server only when direct-volume metadata is present.
+	directVolumes, err := util.ResolveCSIVolumesForPod("", func() (string, error) {
+		return s.ppService.GetPodUID(ctx, pod, namespace)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("resolve CSI direct volumes: %w", err)
+	}
+	csiVolumes := directVolumes.ProviderVolumes()
 	if len(csiVolumes) > 0 {
 		logger.Printf("Found %d CSI volumes to attach to PodVM", len(csiVolumes))
 	}
@@ -230,7 +239,7 @@ func (s *cloudService) CreateVM(ctx context.Context, req *pb.CreateVMRequest) (r
 	}
 	socketPath := filepath.Join(podDir, proxy.SocketName)
 
-	agentProxy := s.proxyFactory.New(serverName, socketPath)
+	agentProxy := s.proxyFactory.New(serverName, socketPath, directVolumes)
 
 	daemonConfig := forwarder.Config{
 		PodNamespace: namespace,

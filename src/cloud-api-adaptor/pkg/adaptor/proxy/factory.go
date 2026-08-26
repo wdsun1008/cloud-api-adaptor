@@ -6,11 +6,12 @@ package proxy
 import (
 	"time"
 
+	"github.com/confidential-containers/cloud-api-adaptor/src/cloud-api-adaptor/pkg/util"
 	"github.com/confidential-containers/cloud-api-adaptor/src/cloud-api-adaptor/pkg/util/tlsutil"
 )
 
 type Factory interface {
-	New(serverName, socketPath string) AgentProxy
+	New(serverName, socketPath string, directVolumes *util.DirectVolumeResolution) AgentProxy
 }
 
 type factory struct {
@@ -52,7 +53,7 @@ func NewFactory(pauseImage string, tlsConfig *tlsutil.TLSConfig, proxyTimeout ti
 	}
 }
 
-func (f *factory) New(serverName, socketPath string) AgentProxy {
+func (f *factory) New(serverName, socketPath string, directVolumes *util.DirectVolumeResolution) AgentProxy {
 
-	return NewAgentProxy(serverName, socketPath, f.pauseImage, f.tlsConfig, f.caService, f.proxyTimeout)
+	return newAgentProxy(serverName, socketPath, f.pauseImage, f.tlsConfig, f.caService, f.proxyTimeout, directVolumes)
 }

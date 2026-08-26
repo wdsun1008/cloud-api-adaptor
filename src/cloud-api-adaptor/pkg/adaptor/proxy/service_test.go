@@ -5,12 +5,7 @@ package proxy
 
 import (
 	"context"
-	b64 "encoding/base64"
-	"errors"
-	"fmt"
 	"net"
-	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/containerd/ttrpc"
@@ -22,18 +17,17 @@ import (
 // Test constants
 const (
 	// Volume and path constants
-	testVolumePathCSI        = "/var/lib/kubelet/pods/abc/volumes/kubernetes.io~csi/pvc123/mount"
-	testVolumePathKubelet    = "/var/lib/kubelet"
-	testVolumePathInvalidCSI = "/var/lib/kubelet/kubernetes.io~csi/12345/mount"
-	testMountDestination     = "/data"
-	testMountType            = "bind"
-	testMountPointData       = "/mnt/data"
-	testMountPointImage      = "/mnt/image"
-	testMountPointShared     = "/mnt/shared"
-	testDeviceContainerPath  = "/dev/test"
-	testDeviceVMPath         = "/dev/vda"
-	testDeviceVMPathVdb      = "/dev/vdb"
-	testDeviceType           = "b"
+	testVolumePathCSI       = "/var/lib/kubelet/pods/abc/volumes/kubernetes.io~csi/pvc123/mount"
+	testVolumePathKubelet   = "/var/lib/kubelet"
+	testMountDestination    = "/data"
+	testMountType           = "bind"
+	testMountPointData      = "/mnt/data"
+	testMountPointImage     = "/mnt/image"
+	testMountPointShared    = "/mnt/shared"
+	testDeviceContainerPath = "/dev/test"
+	testDeviceVMPath        = "/dev/vda"
+	testDeviceVMPathVdb     = "/dev/vdb"
+	testDeviceType          = "b"
 
 	// Container ID constants
 	testContainerID123    = "test-123"
@@ -69,62 +63,7 @@ const (
 	testPauseImage = "pause:3.9"
 	testHostname   = "test-host"
 	testPolicyData = "test-policy-data"
-
-	// File permission constant
-	testDirPermission = 0700
 )
-
-func TestIsNodePublishVolumeTargetPath(t *testing.T) {
-	volumePath := testVolumePathCSI
-	directVolumesDir := t.TempDir()
-
-	t.Run("Empty direct-volumes dir", func(t *testing.T) {
-		assert.False(t, isNodePublishVolumeTargetPath(volumePath, directVolumesDir))
-	})
-
-	t.Run("Good path", func(t *testing.T) {
-		err := prepareVolumeDir(directVolumesDir, volumePath)
-		require.NoError(t, err, "Failed to add volume dir")
-
-		assert.True(t, isNodePublishVolumeTargetPath(volumePath, directVolumesDir))
-	})
-
-	t.Run("Not CSI path", func(t *testing.T) {
-		volumePath = testVolumePathKubelet
-
-		err := prepareVolumeDir(directVolumesDir, volumePath)
-		require.NoError(t, err, "Failed to add volume dir")
-
-		assert.False(t, isNodePublishVolumeTargetPath(volumePath, directVolumesDir))
-	})
-
-	t.Run("Not much volumes/kubernetes.io~csi", func(t *testing.T) {
-		volumePath = testVolumePathInvalidCSI
-
-		err := prepareVolumeDir(directVolumesDir, volumePath)
-		require.NoError(t, err, "Failed to add volume dir")
-
-		assert.False(t, isNodePublishVolumeTargetPath(volumePath, directVolumesDir))
-	})
-}
-
-func prepareVolumeDir(directVolumesDir, volumePath string) error {
-	volumeDir := filepath.Join(directVolumesDir, b64.URLEncoding.EncodeToString([]byte(volumePath)))
-	stat, err := os.Stat(volumeDir)
-	if err != nil {
-		if !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
-		if err := os.MkdirAll(volumeDir, testDirPermission); err != nil {
-			return err
-		}
-	}
-	if stat != nil && !stat.IsDir() {
-		return fmt.Errorf("%s should be a directory", volumeDir)
-	}
-
-	return nil
-}
 
 // Test newProxyService
 func TestNewProxyService(t *testing.T) {
@@ -132,7 +71,7 @@ func TestNewProxyService(t *testing.T) {
 		return nil, nil
 	}
 
-	service := newProxyService(dialer, testPauseImage)
+	service := newProxyService(dialer, testPauseImage, nil)
 	assert.NotNil(t, service, "expected non-nil service")
 	assert.Equal(t, testPauseImage, service.pauseImage, "expected pause:3.9")
 }
@@ -181,8 +120,6 @@ func (b *createContainerRequestBuilder) build() *pb.CreateContainerRequest {
 
 // Test CreateContainer with various scenarios
 func TestProxyServiceCreateContainer(t *testing.T) {
-	dir := t.TempDir()
-
 	service, cleanup := setupMockAgentAndService(t)
 	defer cleanup()
 
@@ -201,7 +138,7 @@ func TestProxyServiceCreateContainer(t *testing.T) {
 					withAnnotations(map[string]string{testAnnotationKey1: testAnnotationValue1}).
 					withMounts(&pb.Mount{
 						Destination: testMountDestination,
-						Source:      testVolumePathCSI,
+						Source:      testVolumePathKubelet,
 						Type:        testMountType,
 					}).
 					build()
@@ -262,22 +199,18 @@ func TestProxyServiceCreateContainer(t *testing.T) {
 			},
 		},
 		{
-			name: "CreateContainer with CSI volume mount",
+			name: "CreateContainer rejects an unresolved CSI volume mount",
 			buildRequest: func() *pb.CreateContainerRequest {
-				// Prepare volume directory
-				volumePath := testVolumePathCSI
-				err := prepareVolumeDir(dir, volumePath)
-				require.NoError(t, err, "failed to prepare volume dir")
-
 				return newCreateContainerRequest(testContainerIDCSI).
+					withAnnotations(map[string]string{"io.kubernetes.cri.sandbox-uid": "abc"}).
 					withMounts(&pb.Mount{
 						Destination: testMountDestination,
-						Source:      volumePath,
+						Source:      testVolumePathCSI,
 						Type:        testMountType,
 					}).
 					build()
 			},
-			expectError: false,
+			expectError: true,
 		},
 		{
 			name: "CreateContainer with agent error",
@@ -300,7 +233,7 @@ func TestProxyServiceCreateContainer(t *testing.T) {
 					return net.Dial(testNetworkTCP, errorAgentListener.Addr().String())
 				}
 
-				errorService := newProxyService(errorDialer, "")
+				errorService := newProxyService(errorDialer, "", nil)
 				err = errorService.Connect(context.Background())
 				require.NoError(t, err, "failed to connect")
 
@@ -466,7 +399,7 @@ func setupMockAgentAndService(t *testing.T) (*proxyService, func()) {
 		return net.Dial(testNetworkTCP, agentListener.Addr().String())
 	}
 
-	service := newProxyService(dialer, "")
+	service := newProxyService(dialer, "", nil)
 	err := service.Connect(context.Background())
 	require.NoError(t, err)
 

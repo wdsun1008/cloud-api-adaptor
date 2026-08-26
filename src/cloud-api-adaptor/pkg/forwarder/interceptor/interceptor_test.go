@@ -1001,7 +1001,7 @@ func TestCloudVolumesJSONParseError(t *testing.T) {
 					Namespaces: []*pb.LinuxNamespace{},
 				},
 				Annotations: map[string]string{
-					util.CloudVolumesAnnotationKey: `{"vol-0":{"fs_type":"ext4","lun":"0"}}`,
+					util.CloudVolumesAnnotationKey: `{"vol-0":{"fs_type":"ext4","lun":"0","disk_id":"disk-0","readonly":false}}`,
 				},
 			},
 		}
@@ -1009,7 +1009,7 @@ func TestCloudVolumesJSONParseError(t *testing.T) {
 		ctx := context.Background()
 		_, err := i.CreateContainer(ctx, req)
 		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "missing required mount_point or lun")
+		assert.Contains(t, err.Error(), "invalid mount_point")
 	})
 
 	t.Run("unsupported filesystem type returns error", func(t *testing.T) {
@@ -1026,7 +1026,7 @@ func TestCloudVolumesJSONParseError(t *testing.T) {
 					Namespaces: []*pb.LinuxNamespace{},
 				},
 				Annotations: map[string]string{
-					util.CloudVolumesAnnotationKey: `{"vol-0":{"mount_point":"/data","fs_type":"ntfs","lun":"0"}}`,
+					util.CloudVolumesAnnotationKey: `{"vol-0":{"mount_point":"/data","fs_type":"ntfs","lun":"0","disk_id":"disk-0","readonly":false}}`,
 				},
 			},
 		}
@@ -1059,7 +1059,7 @@ func TestCloudVolumesJSONParseError(t *testing.T) {
 		ctx := context.Background()
 		_, err := i.CreateContainer(ctx, req)
 		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "unsafe name")
+		assert.Contains(t, err.Error(), "invalid key")
 	})
 
 	t.Run("invalid lun value returns error", func(t *testing.T) {
@@ -1076,7 +1076,7 @@ func TestCloudVolumesJSONParseError(t *testing.T) {
 					Namespaces: []*pb.LinuxNamespace{},
 				},
 				Annotations: map[string]string{
-					util.CloudVolumesAnnotationKey: `{"vol-0":{"mount_point":"/data","fs_type":"ext4","lun":"abc"}}`,
+					util.CloudVolumesAnnotationKey: `{"vol-0":{"mount_point":"/data","fs_type":"ext4","lun":"abc","disk_id":"disk-0","readonly":false}}`,
 				},
 			},
 		}
@@ -1087,7 +1087,7 @@ func TestCloudVolumesJSONParseError(t *testing.T) {
 		assert.Contains(t, err.Error(), "invalid lun")
 	})
 
-	t.Run("valid cloud_volumes without device does not panic", func(t *testing.T) {
+	t.Run("cloud_volumes without disk identity does not panic", func(t *testing.T) {
 		mock := &mockRedirector{}
 		i := &interceptor{
 			Redirector: mock,
@@ -1101,14 +1101,14 @@ func TestCloudVolumesJSONParseError(t *testing.T) {
 					Namespaces: []*pb.LinuxNamespace{},
 				},
 				Annotations: map[string]string{
-					util.CloudVolumesAnnotationKey: `{"vol-0":{"mount_point":"/data","fs_type":"ext4","lun":"0","disk_id":"vol-fake"}}`,
+					util.CloudVolumesAnnotationKey: `{"vol-0":{"mount_point":"/data","fs_type":"ext4","lun":"0","readonly":false}}`,
 				},
 			},
 		}
 
 		ctx := context.Background()
 		_, err := i.CreateContainer(ctx, req)
-		// Will error because the device doesn't exist, but should not panic
+		// Invalid host input must fail closed without dereferencing device state.
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "cloud volume vol-0")
 	})
@@ -1137,6 +1137,11 @@ func TestCloudVolumesJSONParseError(t *testing.T) {
 		assert.NoError(t, err)
 		assert.True(t, mock.createContainerCalled)
 	})
+}
+
+func TestNormalizeBindMountOptionsReadOnly(t *testing.T) {
+	assert.Equal(t, []string{"rbind", "ro"}, normalizeBindMountOptions([]string{"rbind", "rw"}, true))
+	assert.Equal(t, []string{"rbind", "rw"}, normalizeBindMountOptions([]string{"rbind", "rw"}, false))
 }
 
 func TestHasPartitions(t *testing.T) {

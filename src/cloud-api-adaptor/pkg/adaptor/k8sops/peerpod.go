@@ -91,6 +91,24 @@ func (s *PeerPodService) getPod(podname string, podns string) (*v1.Pod, error) {
 	return pod, nil
 }
 
+// GetPodUID returns the API server's identity for a Pod. The remote
+// hypervisor CreateVM request carries the Pod name and namespace but not its
+// CRI sandbox UID, so direct-volume resolution uses this authoritative value
+// instead of inferring ownership from host-controlled metadata.
+func (s *PeerPodService) GetPodUID(ctx context.Context, podname, podns string) (string, error) {
+	if s == nil || s.client == nil {
+		return "", errors.New("PeerPodService Kubernetes client is unavailable")
+	}
+	pod, err := s.client.CoreV1().Pods(podns).Get(ctx, podname, metav1.GetOptions{})
+	if err != nil {
+		return "", err
+	}
+	if pod.UID == "" {
+		return "", fmt.Errorf("pod %s/%s has an empty UID", podns, podname)
+	}
+	return string(pod.UID), nil
+}
+
 // make the pod an owner of a PeerPod
 func (s *PeerPodService) OwnPeerPod(podname string, podns string, instanceID string) error {
 	pod, err := s.getPod(podname, podns)

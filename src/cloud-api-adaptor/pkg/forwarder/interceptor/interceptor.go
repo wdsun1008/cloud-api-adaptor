@@ -5,7 +5,6 @@ package interceptor
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -160,8 +159,8 @@ func (i *interceptor) CreateContainer(ctx context.Context, req *pb.CreateContain
 	}
 
 	if cvJSON, ok := req.OCI.Annotations[util.CloudVolumesAnnotationKey]; ok && cvJSON != "" {
-		var cloudVolumes map[string]util.CloudVolumeAnnotation
-		if err := json.Unmarshal([]byte(cvJSON), &cloudVolumes); err != nil {
+		cloudVolumes, err := util.DecodeCloudVolumeAnnotations(cvJSON)
+		if err != nil {
 			return nil, fmt.Errorf("corrupt cloud_volumes annotation (pod would start without volumes): %w", err)
 		}
 
@@ -175,6 +174,8 @@ func (i *interceptor) CreateContainer(ctx context.Context, req *pb.CreateContain
 			volInfo := cloudVolumes[volName]
 			mountPoint := volInfo.MountPoint
 			fsType := volInfo.FSType
+			options := append([]string(nil), volInfo.Options...)
+			readOnly := volInfo.ReadOnly
 			lunStr := volInfo.LUN
 			if mountPoint == "" || lunStr == "" {
 				return nil, fmt.Errorf("cloud volume %s missing required mount_point or lun field", volName)
@@ -215,18 +216,18 @@ func (i *interceptor) CreateContainer(ctx context.Context, req *pb.CreateContain
 
 			if volInfo.EncryptType != "" {
 				mapperName := "caa-" + safeName
-				if err := secureMount(ctx, device, hostMountPoint, fsType, volInfo.EncryptType, volInfo.KeyID, mapperName); err != nil {
+				if err := secureMount(ctx, device, hostMountPoint, fsType, volInfo.EncryptType, volInfo.KeyID, mapperName, readOnly, options); err != nil {
 					return nil, fmt.Errorf("failed to secure-mount cloud volume %s at %s: %w", volName, hostMountPoint, err)
 				}
 				i.cloudMounts = append(i.cloudMounts, cloudMount{path: hostMountPoint, encrypted: true, mapperName: mapperName})
 			} else {
-				if err := formatAndMount(device, hostMountPoint, fsType); err != nil {
+				if err := formatAndMount(device, hostMountPoint, fsType, readOnly, options); err != nil {
 					return nil, fmt.Errorf("failed to mount cloud volume %s at %s: %w", volName, hostMountPoint, err)
 				}
 				i.cloudMounts = append(i.cloudMounts, cloudMount{path: hostMountPoint, encrypted: false})
 			}
 
-			if fsGroupStr := volInfo.FSGroup; fsGroupStr != "" {
+			if fsGroupStr := volInfo.FSGroup; fsGroupStr != "" && !readOnly {
 				if gid, err := strconv.Atoi(fsGroupStr); err == nil {
 					logger.Printf("cloud volume %s: applying fsGroup %d to %s", volName, gid, hostMountPoint)
 					if err := os.Chown(hostMountPoint, -1, gid); err != nil {
@@ -243,13 +244,14 @@ func (i *interceptor) CreateContainer(ctx context.Context, req *pb.CreateContain
 				if m.Destination == mountPoint {
 					req.OCI.Mounts[idx].Source = hostMountPoint
 					req.OCI.Mounts[idx].Type = "bind"
+					req.OCI.Mounts[idx].Options = normalizeBindMountOptions(req.OCI.Mounts[idx].Options, readOnly)
 					logger.Printf("cloud volume %s: rewrote mount source to %s", volName, hostMountPoint)
 					rewrote = true
 					break
 				}
 			}
 			if !rewrote {
-				logger.Printf("WARNING: cloud volume %s mount_point %q not found in container mounts", volName, mountPoint)
+				return nil, fmt.Errorf("cloud volume %s mount_point %q not found in container mounts", volName, mountPoint)
 			}
 		}
 	}
@@ -287,6 +289,29 @@ func (i *interceptor) CreateContainer(ctx context.Context, req *pb.CreateContain
 
 func isTargetPath(path, targetPath string) bool {
 	return targetPath != "" && targetPath == path
+}
+
+func normalizeBindMountOptions(options []string, readOnly bool) []string {
+	result := make([]string, 0, len(options)+1)
+	seen := make(map[string]struct{}, len(options)+1)
+	for _, raw := range options {
+		option := strings.TrimSpace(raw)
+		lower := strings.ToLower(option)
+		if option == "" || (readOnly && lower == "rw") {
+			continue
+		}
+		if _, exists := seen[lower]; exists {
+			continue
+		}
+		seen[lower] = struct{}{}
+		result = append(result, option)
+	}
+	if readOnly {
+		if _, exists := seen["ro"]; !exists {
+			result = append(result, "ro")
+		}
+	}
+	return result
 }
 
 func waitForDeviceMounted(ctx context.Context, path string) error {
@@ -749,7 +774,7 @@ func waitForDevice(device string) error {
 	return fmt.Errorf("device %s not available after 60s", device)
 }
 
-func formatAndMount(device, mountPoint, fsType string) error {
+func formatAndMount(device, mountPoint, fsType string, readOnly bool, options []string) error {
 	if fsType == "" {
 		fsType = "ext4"
 	}
@@ -764,7 +789,12 @@ func formatAndMount(device, mountPoint, fsType string) error {
 
 	// Try mounting first — if the disk already has a valid filesystem, this
 	// avoids any risk of accidentally reformatting it.
-	mountCmd := exec.Command("mount", "-t", fsType, device, mountPoint)
+	mountArgs := []string{"-t", fsType}
+	if len(options) > 0 {
+		mountArgs = append(mountArgs, "-o", strings.Join(options, ","))
+	}
+	mountArgs = append(mountArgs, device, mountPoint)
+	mountCmd := exec.Command("mount", mountArgs...)
 	if mountOut, mountErr := mountCmd.CombinedOutput(); mountErr == nil {
 		logger.Printf("Mounted existing filesystem on %s at %s (type=%s)", device, mountPoint, fsType)
 		return nil
@@ -778,7 +808,7 @@ func formatAndMount(device, mountPoint, fsType string) error {
 		out, err := exec.Command("blkid", "-p", device).CombinedOutput()
 		outStr := strings.TrimSpace(string(out))
 		if err == nil && len(outStr) > 0 {
-			autoMount := exec.Command("mount", device, mountPoint)
+			autoMount := exec.Command("mount", mountArgs...)
 			if autoOut, autoErr := autoMount.CombinedOutput(); autoErr == nil {
 				logger.Printf("Mounted %s at %s (auto-detected type from: %s)", device, mountPoint, outStr)
 				return nil
@@ -805,6 +835,9 @@ func formatAndMount(device, mountPoint, fsType string) error {
 	if !needsFormat {
 		return fmt.Errorf("cannot determine filesystem state of %s after retries; refusing to format to protect data", device)
 	}
+	if readOnly {
+		return fmt.Errorf("readonly device %s has no filesystem; refusing to format", device)
+	}
 
 	logger.Printf("No filesystem on %s, formatting as %s", device, fsType)
 	mkfsCmd := exec.Command("mkfs."+fsType, device)
@@ -813,7 +846,7 @@ func formatAndMount(device, mountPoint, fsType string) error {
 	}
 	logger.Printf("Formatted %s as %s", device, fsType)
 
-	mountCmd2 := exec.Command("mount", "-t", fsType, device, mountPoint)
+	mountCmd2 := exec.Command("mount", mountArgs...)
 	if mountOut, mountErr := mountCmd2.CombinedOutput(); mountErr != nil {
 		return fmt.Errorf("mount after format %s -> %s failed: %s: %w", device, mountPoint, strings.TrimSpace(string(mountOut)), mountErr)
 	}
@@ -857,7 +890,7 @@ func validateEncryptParams(encryptType, keyID string) (string, error) {
 	}
 }
 
-func secureMount(ctx context.Context, device, mountPoint, fsType, encryptType, keyID, mapperName string) error {
+func secureMount(ctx context.Context, device, mountPoint, fsType, encryptType, keyID, mapperName string, readOnly bool, mountOptions []string) error {
 	normalized, err := validateEncryptParams(encryptType, keyID)
 	if err != nil {
 		return err
@@ -892,9 +925,12 @@ func secureMount(ctx context.Context, device, mountPoint, fsType, encryptType, k
 	if mapperName != "" {
 		options["mapperName"] = mapperName
 	}
+	if readOnly {
+		options["readOnly"] = "true"
+	}
 
 	// Upstream SecureMountResponse is empty; mount point is the path we requested.
-	if err := client.secureMount(ctx, "block-device", options, []string{}, mountPoint); err != nil {
+	if err := client.secureMount(ctx, "block-device", options, mountOptions, mountPoint); err != nil {
 		return fmt.Errorf("CDH secure_mount failed for %s: %w", device, err)
 	}
 

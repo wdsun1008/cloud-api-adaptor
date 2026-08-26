@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/confidential-containers/cloud-api-adaptor/src/cloud-api-adaptor/pkg/util"
 	"github.com/confidential-containers/cloud-api-adaptor/src/cloud-api-adaptor/pkg/util/tlsutil"
 	"github.com/containerd/ttrpc"
 	pb "github.com/kata-containers/kata-containers/src/runtime/virtcontainers/pkg/agent/protocols/grpc"
@@ -148,35 +149,34 @@ func TestDialerSuccess(t *testing.T) {
 
 		require.NoError(t, listener.Close(), "expect no error closing listener")
 
-		listenerErrCh := make(chan error)
+		type listenerResult struct {
+			listener net.Listener
+			err      error
+		}
+		listenerCh := make(chan listenerResult, 1)
 		go func() {
-			defer close(listenerErrCh)
-
 			time.Sleep(testTimeout250)
-
-			var err error
 			// Open the same port
-			listener, err = net.Listen(testNetworkTCP, address)
-			if err != nil {
-				listenerErrCh <- err
-			}
+			reopened, err := net.Listen(testNetworkTCP, address)
+			listenerCh <- listenerResult{listener: reopened, err: err}
 		}()
 
 		conn, err := p.dial(context.Background(), address)
-		if err == nil {
-			listener.Close()
-			break
-		}
-		defer conn.Close()
-
-		if e := <-listenerErrCh; e != nil {
+		result := <-listenerCh
+		if result.err != nil {
 			// A rare case occurs. Retry the test.
-			t.Logf("%v", e)
+			if conn != nil {
+				_ = conn.Close()
+			}
+			t.Logf("%v", result.err)
 			continue
 		}
-
-		listener.Close()
+		require.NotNil(t, result.listener)
+		defer result.listener.Close()
 		assert.NoError(t, err, "expect no error dialing")
+		if conn != nil {
+			require.NoError(t, conn.Close())
+		}
 		break
 	}
 }
@@ -300,13 +300,14 @@ func TestNewFactory(t *testing.T) {
 		assert.NotNil(t, proxyFactory)
 
 		// Just verify it's not nil and can create proxies
-		proxy := proxyFactory.New(testServerName, testSocketPathTest)
+		proxy := proxyFactory.New(testServerName, testSocketPathTest, nil)
 		assert.NotNil(t, proxy)
 	})
 
 	t.Run("Factory.New creates AgentProxy", func(t *testing.T) {
 		proxyFactory := NewFactory(testPauseImageLatest, nil, testTimeout5SecondProxy)
-		proxy := proxyFactory.New(testServerName, testSocketPathTest)
+		resolution := new(util.DirectVolumeResolution)
+		proxy := proxyFactory.New(testServerName, testSocketPathTest, resolution)
 
 		assert.NotNil(t, proxy)
 
@@ -317,6 +318,7 @@ func TestNewFactory(t *testing.T) {
 		assert.Equal(t, testSocketPathTest, p.socketPath)
 		assert.Equal(t, testPauseImageLatest, p.pauseImage)
 		assert.Equal(t, testTimeout5SecondProxy, p.proxyTimeout)
+		assert.Same(t, resolution, p.directVolumes)
 	})
 }
 

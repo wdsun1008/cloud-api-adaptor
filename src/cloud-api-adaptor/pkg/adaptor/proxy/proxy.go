@@ -17,6 +17,7 @@ import (
 	"time"
 
 	retry "github.com/avast/retry-go/v4"
+	"github.com/confidential-containers/cloud-api-adaptor/src/cloud-api-adaptor/pkg/util"
 	"github.com/confidential-containers/cloud-api-adaptor/src/cloud-api-adaptor/pkg/util/tlsutil"
 	"github.com/containerd/ttrpc"
 	pb "github.com/kata-containers/kata-containers/src/runtime/virtcontainers/pkg/agent/protocols/grpc"
@@ -42,27 +43,33 @@ type AgentProxy interface {
 }
 
 type agentProxy struct {
-	tlsConfig    *tlsutil.TLSConfig
-	caService    tlsutil.CAService
-	readyCh      chan struct{}
-	stopCh       chan struct{}
-	serverName   string
-	socketPath   string
-	pauseImage   string
-	proxyTimeout time.Duration
-	stopOnce     sync.Once
+	tlsConfig     *tlsutil.TLSConfig
+	caService     tlsutil.CAService
+	readyCh       chan struct{}
+	stopCh        chan struct{}
+	serverName    string
+	socketPath    string
+	pauseImage    string
+	proxyTimeout  time.Duration
+	directVolumes *util.DirectVolumeResolution
+	stopOnce      sync.Once
 }
 
 func NewAgentProxy(serverName, socketPath, pauseImage string, tlsConfig *tlsutil.TLSConfig, caService tlsutil.CAService, proxyTimeout time.Duration) AgentProxy {
+	return newAgentProxy(serverName, socketPath, pauseImage, tlsConfig, caService, proxyTimeout, nil)
+}
+
+func newAgentProxy(serverName, socketPath, pauseImage string, tlsConfig *tlsutil.TLSConfig, caService tlsutil.CAService, proxyTimeout time.Duration, directVolumes *util.DirectVolumeResolution) AgentProxy {
 	return &agentProxy{
-		serverName:   serverName,
-		socketPath:   socketPath,
-		readyCh:      make(chan struct{}),
-		stopCh:       make(chan struct{}),
-		proxyTimeout: proxyTimeout,
-		pauseImage:   pauseImage,
-		tlsConfig:    tlsConfig,
-		caService:    caService,
+		serverName:    serverName,
+		socketPath:    socketPath,
+		readyCh:       make(chan struct{}),
+		stopCh:        make(chan struct{}),
+		proxyTimeout:  proxyTimeout,
+		pauseImage:    pauseImage,
+		tlsConfig:     tlsConfig,
+		caService:     caService,
+		directVolumes: directVolumes,
 	}
 }
 
@@ -148,7 +155,7 @@ func (p *agentProxy) Start(ctx context.Context, serverURL *url.URL) error {
 		return p.dial(ctx, serverURL.Host)
 	}
 
-	proxyService := newProxyService(dialer, p.pauseImage)
+	proxyService := newProxyService(dialer, p.pauseImage, p.directVolumes)
 	defer func() {
 		if err := proxyService.Close(); err != nil {
 			logger.Printf("error closing agent proxy connection: %v", err)
