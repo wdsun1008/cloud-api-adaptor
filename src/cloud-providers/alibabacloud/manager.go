@@ -34,8 +34,7 @@ func (*Manager) ParseCmd(flags *flag.FlagSet) {
 	reg.IntWithEnv(&alibabacloudcfg.SystemDiskSize, "system-disk-size", 40, "SYSTEM_DISK_SIZE", "System Disk size (in GiB) for the Pod VMs")
 	reg.BoolWithEnv(&alibabacloudcfg.DisableCVM, "disable-cvm", false, "DISABLECVM", "Use non-CVMs for peer pods")
 
-	// Flags without environment variable support (pass empty string for envVarName)
-	reg.StringWithEnv(&alibabacloudcfg.VpcID, "vpc-id", "", "", "VPC ID to be used for the Pod VMs")
+	reg.StringWithEnv(&alibabacloudcfg.VpcID, "vpc-id", "", "VPC_ID", "VPC ID to be used for the Pod VMs")
 
 	// Custom flag types (comma-separated lists)
 	reg.CustomTypeWithEnv(&alibabacloudcfg.SecurityGroupIDs, "security-group-ids", "cn-beijing", "SECURITY_GROUP_IDS", "Security Group Ids to be used for the Pod VM, comma separated")

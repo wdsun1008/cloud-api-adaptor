@@ -144,7 +144,7 @@ func NewProvider(config *Config) (provider.Provider, error) {
 		return nil, fmt.Errorf("failed to update instance type spec list: %v", err)
 	}
 
-	if err = provider.updateVpcID(); err != nil {
+	if err = provider.ensureVpcID(); err != nil {
 		return nil, fmt.Errorf("failed to get vpc id: %v", err)
 	}
 
@@ -438,6 +438,13 @@ func (p *alibabaCloudProvider) updateVpcID() error {
 
 	p.serviceConfig.VpcID = *response.Body.VpcId
 	return nil
+}
+
+func (p *alibabaCloudProvider) ensureVpcID() error {
+	if p.serviceConfig.VpcID != "" {
+		return nil
+	}
+	return p.updateVpcID()
 }
 
 // Add SelectInstanceType method to select an instance type based on the memory and vcpu requirements
