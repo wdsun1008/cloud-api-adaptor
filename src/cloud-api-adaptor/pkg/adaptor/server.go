@@ -52,7 +52,8 @@ type server struct {
 }
 
 func NewServer(provider provider.Provider, cfg *cloud.ServerConfig, workerNode podnetwork.WorkerNode) Server {
-	logger.Printf("server config: %#v", cfg)
+	logger.Printf("server config: socket=%q pods-dir=%q forwarder-port=%q tls=%t initdata=%t image-pull-secrets-disabled=%t",
+		cfg.SocketPath, cfg.PodsDir, cfg.ForwarderPort, cfg.TLSConfig != nil, cfg.Initdata != "", cfg.DisableImagePullSecrets)
 
 	agentFactory := proxy.NewFactory(cfg.PauseImage, cfg.TLSConfig, cfg.ProxyTimeout)
 	cloudService := cloud.NewService(provider, agentFactory, workerNode, cfg)

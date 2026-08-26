@@ -24,14 +24,15 @@ type Service interface {
 }
 
 type cloudService struct {
-	provider     provider.Provider
-	proxyFactory proxy.Factory
-	workerNode   podnetwork.WorkerNode
-	sandboxes    map[sandboxID]*sandbox
-	cond         *sync.Cond
-	mutex        sync.Mutex
-	ppService    *k8sops.PeerPodService
-	serverConfig *ServerConfig
+	provider            provider.Provider
+	proxyFactory        proxy.Factory
+	workerNode          podnetwork.WorkerNode
+	sandboxes           map[sandboxID]*sandbox
+	cond                *sync.Cond
+	mutex               sync.Mutex
+	ppService           *k8sops.PeerPodService
+	serverConfig        *ServerConfig
+	getImagePullSecrets func(string, string) ([]byte, error)
 }
 
 type sandboxID string

@@ -162,10 +162,7 @@ func (s *proxyService) CreateSandbox(ctx context.Context, req *pb.CreateSandboxR
 	logger.Printf("CreateSandbox: hostname:%s sandboxId:%s", req.Hostname, req.SandboxId)
 
 	if len(req.Storages) > 0 {
-		logger.Print("    storages:")
-		for _, s := range req.Storages {
-			logger.Printf("        mountpoint:%s source:%s fstype:%s driver:%s", s.MountPoint, s.Source, s.Fstype, s.Driver)
-		}
+		logger.Printf("CreateSandbox request shape: storages=%d", len(req.Storages))
 	}
 
 	res, err := s.Redirector.CreateSandbox(ctx, req)

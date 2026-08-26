@@ -44,6 +44,7 @@ type ServerConfig struct {
 	ProxyTimeout            time.Duration
 	Initdata                string
 	EnableCloudConfigVerify bool
+	DisableImagePullSecrets bool
 	PeerPodsLimitPerNode    int
 	RootVolumeSize          int
 	EnableScratchSpace      bool
@@ -92,11 +93,12 @@ func NewService(provider provider.Provider, proxyFactory proxy.Factory, workerNo
 	var err error
 
 	s := &cloudService{
-		provider:     provider,
-		proxyFactory: proxyFactory,
-		sandboxes:    map[sandboxID]*sandbox{},
-		serverConfig: serverConfig,
-		workerNode:   workerNode,
+		provider:            provider,
+		proxyFactory:        proxyFactory,
+		sandboxes:           map[sandboxID]*sandbox{},
+		serverConfig:        serverConfig,
+		workerNode:          workerNode,
+		getImagePullSecrets: k8sops.GetImagePullSecrets,
 	}
 	s.cond = sync.NewCond(&s.mutex)
 	s.ppService, err = k8sops.NewPeerPodService()
@@ -270,13 +272,6 @@ func (s *cloudService) CreateVM(ctx context.Context, req *pb.CreateVMRequest) (r
 		return nil, fmt.Errorf("generating JSON data: %w", err)
 	}
 
-	// Store apf.json in worker node for debugging
-	apfJSONPath := filepath.Join(podDir, "apf.json")
-	if err := os.WriteFile(apfJSONPath, apfJSON, 0o666); err != nil {
-		return nil, fmt.Errorf("storing %s: %w", apfJSONPath, err)
-	}
-	logger.Printf("stored %s", apfJSONPath)
-
 	cloudConfig := &cloudinit.CloudConfig{
 		WriteFiles: []cloudinit.WriteFile{
 			{
@@ -286,21 +281,24 @@ func (s *cloudService) CreateVM(ctx context.Context, req *pb.CreateVMRequest) (r
 		},
 	}
 
-	// Look up image pull secrets for the pod
-	authJSON, err := k8sops.GetImagePullSecrets(pod, namespace)
-	if err != nil {
-		// Ignore errors getting secrets to match K8S behavior
-		logger.Printf("error reading image pull secrets: %v", err)
-	}
-	if authJSON != nil {
-		logger.Printf("successfully retrieved pod image pull secrets for %s/%s", namespace, pod)
-		if len(authJSON) > cloudinit.DefaultAuthfileLimit {
-			logger.Printf("Credentials file is too large to be included in cloud-config")
-		} else {
-			cloudConfig.WriteFiles = append(cloudConfig.WriteFiles, cloudinit.WriteFile{
-				Path:    paths.AuthFilePath,
-				Content: string(authJSON),
-			})
+	if !s.serverConfig.DisableImagePullSecrets {
+		// Confidential deployments can disable this host-to-user-data path and
+		// provision registry credentials through an attestation-gated KBS resource.
+		authJSON, err := s.getImagePullSecrets(pod, namespace)
+		if err != nil {
+			// Ignore errors getting secrets to match K8S behavior.
+			logger.Printf("error reading image pull secrets: %v", err)
+		}
+		if authJSON != nil {
+			logger.Printf("retrieved pod image pull credentials")
+			if len(authJSON) > cloudinit.DefaultAuthfileLimit {
+				logger.Printf("Credentials file is too large to be included in cloud-config")
+			} else {
+				cloudConfig.WriteFiles = append(cloudConfig.WriteFiles, cloudinit.WriteFile{
+					Path:    paths.AuthFilePath,
+					Content: string(authJSON),
+				})
+			}
 		}
 	}
 
