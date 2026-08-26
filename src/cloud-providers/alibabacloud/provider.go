@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log"
 	"net/netip"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -36,10 +37,22 @@ const (
 	EnvOidcTokenFile   = "ALIBABA_CLOUD_OIDC_TOKEN_FILE"
 )
 
+var (
+	instanceCleanupTimeout      = 10 * time.Minute
+	instanceCleanupPollInterval = 2 * time.Second
+)
+
+type instanceDeleteLock struct {
+	mu   sync.Mutex
+	refs int
+}
+
 // Make ecsClient a mockable interface
 type ecsClient interface {
 	RunInstances(
 		params *ecs.RunInstancesRequest) (*ecs.RunInstancesResponse, error)
+	DescribeInstances(
+		params *ecs.DescribeInstancesRequest) (*ecs.DescribeInstancesResponse, error)
 	DeleteInstance(
 		params *ecs.DeleteInstanceRequest) (*ecs.DeleteInstanceResponse, error)
 	// Describe InstanceTypes
@@ -48,6 +61,10 @@ type ecsClient interface {
 	// Describe InstanceAttribute
 	DescribeInstanceAttribute(
 		params *ecs.DescribeInstanceAttributeRequest) (*ecs.DescribeInstanceAttributeResponse, error)
+	DescribeDisks(
+		params *ecs.DescribeDisksRequest) (*ecs.DescribeDisksResponse, error)
+	AttachDisk(
+		params *ecs.AttachDiskRequest) (*ecs.AttachDiskResponse, error)
 	// Create NIC
 	CreateNetworkInterface(
 		params *ecs.CreateNetworkInterfaceRequest) (*ecs.CreateNetworkInterfaceResponse, error)
@@ -90,6 +107,12 @@ type alibabaCloudProvider struct {
 	// instanceId to instance Resources
 	eipsMu sync.Mutex
 	eips   map[string]*string
+
+	volumesMu sync.Mutex
+	volumes   map[string][]string
+
+	deleteLocksMu sync.Mutex
+	deleteLocks   map[string]*instanceDeleteLock
 }
 
 func NewProvider(config *Config) (provider.Provider, error) {
@@ -138,6 +161,7 @@ func NewProvider(config *Config) (provider.Provider, error) {
 		serviceConfig: config,
 		vpcClient:     vpcClient,
 		eips:          make(map[string]*string),
+		volumes:       make(map[string][]string),
 	}
 
 	if err = provider.updateInstanceTypeSpecList(); err != nil {
@@ -215,20 +239,34 @@ func (p *alibabaCloudProvider) CreateInstance(ctx context.Context, podName, sand
 	if err != nil {
 		return nil, err
 	}
+	if _, err := validateAlibabaDataDisks(spec.Volumes); err != nil {
+		return nil, err
+	}
 
-	tags := make([]*ecs.RunInstancesRequestTag, 0)
-	for k, v := range p.serviceConfig.Tags {
+	tagKeys := make([]string, 0, len(p.serviceConfig.Tags))
+	for key := range p.serviceConfig.Tags {
+		if key != sandboxIDTagKey && key != createOperationTagKey && key != createFingerprintTagKey {
+			tagKeys = append(tagKeys, key)
+		}
+	}
+	sort.Strings(tagKeys)
+	tags := make([]*ecs.RunInstancesRequestTag, 0, len(tagKeys)+2)
+	for _, k := range tagKeys {
 		tags = append(tags, &ecs.RunInstancesRequestTag{
 			Key:   tea.String(k),
-			Value: tea.String(v),
+			Value: tea.String(p.serviceConfig.Tags[k]),
 		})
 	}
+	tags = append(tags, &ecs.RunInstancesRequestTag{
+		Key: tea.String(sandboxIDTagKey), Value: tea.String(sandboxID),
+	})
 
 	var req *ecs.RunInstancesRequest
 
+	imageID := p.serviceConfig.ImageID
 	if spec.Image != "" {
 		logger.Printf("Choosing %s from annotation as the ECS Image for the PodVM image", spec.Image)
-		p.serviceConfig.ImageID = spec.Image
+		imageID = spec.Image
 	}
 
 	securityGroupIds := []*string{}
@@ -240,7 +278,7 @@ func (p *alibabaCloudProvider) CreateInstance(ctx context.Context, podName, sand
 		RegionId:           tea.String(p.serviceConfig.Region),
 		MinAmount:          tea.Int32(1),
 		Amount:             tea.Int32(1),
-		ImageId:            tea.String(p.serviceConfig.ImageID),
+		ImageId:            tea.String(imageID),
 		InstanceType:       tea.String(instanceType),
 		InstanceChargeType: tea.String("PostPaid"), // pay-as-you-go
 		SecurityGroupIds:   securityGroupIds,
@@ -269,22 +307,31 @@ func (p *alibabaCloudProvider) CreateInstance(ctx context.Context, podName, sand
 
 	// Add block device mappings to the instance to set the root volume size
 	if p.serviceConfig.SystemDiskSize > 0 {
-		req.ImageId = tea.String(p.serviceConfig.ImageID)
+		req.ImageId = tea.String(imageID)
 		req.SystemDisk = &ecs.RunInstancesRequestSystemDisk{
 			Size:     tea.String(strconv.Itoa(p.serviceConfig.SystemDiskSize)),
 			Category: tea.String("cloud_essd"),
 		}
-		logger.Printf("Setting the SystemDisk size to %d GiB with ImageId %s", p.serviceConfig.SystemDiskSize, p.serviceConfig.ImageID)
+		logger.Printf("Setting the SystemDisk size to %d GiB with ImageId %s", p.serviceConfig.SystemDiskSize, imageID)
 	}
 
+	fingerprint, err := createRequestFingerprint(req, spec.Volumes)
+	if err != nil {
+		return nil, err
+	}
+	req.Tag = append(req.Tag, &ecs.RunInstancesRequestTag{
+		Key: tea.String(createFingerprintTagKey), Value: tea.String(fingerprint),
+	})
+	operation, err := createOperationForRequest(sandboxID, fingerprint)
+	if err != nil {
+		return nil, err
+	}
 	logger.Printf("CreateInstance: name: %q", instanceName)
 
-	result, err := p.ecsClient.RunInstances(req)
+	instanceID, err := p.runInstanceForCreateOperation(ctx, sandboxID, req, operation)
 	if err != nil {
-		return nil, fmt.Errorf("creating instance (%v) returned error: %s", result, err)
+		return nil, err
 	}
-
-	instanceID := *result.Body.InstanceIdSets.InstanceIdSet[0]
 	logger.Printf("created an instance %s for sandbox %s", instanceID, sandboxID)
 
 	// Create partial instance to return on error (allows caller to cleanup)
@@ -318,7 +365,17 @@ func (p *alibabaCloudProvider) CreateInstance(ctx context.Context, podName, sand
 	}
 	logger.Printf("Instance %s is ready.", instanceID)
 
-	ips, err := p.getIPs(*result.Body.InstanceIdSets.InstanceIdSet[0], p.ecsClient)
+	attachedDisks, attachErr := p.attachDataDisks(ctx, instanceID, spec.Volumes)
+	if len(attachedDisks) > 0 {
+		p.volumesMu.Lock()
+		p.volumes[instanceID] = append([]string(nil), attachedDisks...)
+		p.volumesMu.Unlock()
+	}
+	if attachErr != nil {
+		return instance, fmt.Errorf("attaching Alibaba Cloud data disks: %w", attachErr)
+	}
+
+	ips, err := p.getIPs(instanceID, p.ecsClient)
 	if err != nil {
 		logger.Printf("failed to get IPs for the instance : %v ", err)
 		return instance, err
@@ -368,35 +425,41 @@ func (p *alibabaCloudProvider) CreateInstance(ctx context.Context, podName, sand
 }
 
 func (p *alibabaCloudProvider) DeleteInstance(ctx context.Context, instanceID string) error {
+	if instanceID == "" {
+		return errors.New("refusing to delete an Alibaba Cloud instance without an ID")
+	}
+	release := p.acquireInstanceDeleteLock(instanceID)
+	defer release()
+
 	logger.Printf("Deleting instance (%s)", instanceID)
-	err := p.waitUntilTimeout(time.Duration(time.Second*30), func() (bool, error) {
-		req := ecs.DeleteInstanceRequest{
-			InstanceId: tea.String(instanceID),
-			Force:      tea.Bool(true),
-		}
-		resp, err := p.ecsClient.DeleteInstance(&req)
-		if err != nil {
-			if *err.(*tea.SDKError).Code == "IncorrectInstanceStatus" {
-				logger.Printf("instance %s is not in the correct state to be deleted, retrying", instanceID)
-				return false, nil
-			}
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), instanceCleanupTimeout)
+	defer cancel()
 
-			if *err.(*tea.SDKError).Code == "InvalidInstanceId.NotFound" {
-				logger.Printf("instance %s is not found", instanceID)
-				return true, nil
-			}
-
-			logger.Printf("failed to delete an instance: %v and the response is %v", err, resp)
-			return false, fmt.Errorf("failed to delete an instance %s: %+v", instanceID, err)
-		}
-
-		return true, nil
-	})
+	diskIDs, err := p.retainedDataDisksForInstanceDelete(cleanupCtx, instanceID)
 	if err != nil {
-		return fmt.Errorf("failed to delete an instance %s", instanceID)
+		return fmt.Errorf("validate retained data disks for instance %s: %w", instanceID, err)
+	}
+	p.rememberInstanceVolumes(instanceID, diskIDs)
+	instanceAbsent := false
+	if len(diskIDs) > 0 {
+		instanceAbsent, err = p.validateInstanceRetainedDiskSafety(cleanupCtx, instanceID)
+		if err != nil {
+			return err
+		}
 	}
 
-	logger.Printf("Deleted an instance %s", instanceID)
+	if !instanceAbsent {
+		if err := p.forceDeleteInstance(cleanupCtx, instanceID); err != nil {
+			return err
+		}
+	}
+
+	if err := p.waitForRetainedDataDisks(cleanupCtx, instanceID, diskIDs); err != nil {
+		return fmt.Errorf("wait for retained data disks from instance %s: %w", instanceID, err)
+	}
+
+	logger.Printf("Deleted instance %s and reconciled cleanup for %d retained data disk(s)", instanceID, len(diskIDs))
+	p.forgetInstanceVolumes(instanceID)
 
 	p.eipsMu.Lock()
 	eipID := p.eips[instanceID]
@@ -411,6 +474,146 @@ func (p *alibabaCloudProvider) DeleteInstance(ctx context.Context, instanceID st
 	}
 
 	return nil
+}
+
+func (p *alibabaCloudProvider) acquireInstanceDeleteLock(instanceID string) func() {
+	p.deleteLocksMu.Lock()
+	if p.deleteLocks == nil {
+		p.deleteLocks = make(map[string]*instanceDeleteLock)
+	}
+	lock := p.deleteLocks[instanceID]
+	if lock == nil {
+		lock = &instanceDeleteLock{}
+		p.deleteLocks[instanceID] = lock
+	}
+	lock.refs++
+	p.deleteLocksMu.Unlock()
+
+	lock.mu.Lock()
+	return func() {
+		lock.mu.Unlock()
+		p.deleteLocksMu.Lock()
+		defer p.deleteLocksMu.Unlock()
+		lock.refs--
+		if lock.refs == 0 && p.deleteLocks[instanceID] == lock {
+			delete(p.deleteLocks, instanceID)
+		}
+	}
+}
+
+func (p *alibabaCloudProvider) forceDeleteInstance(ctx context.Context, instanceID string) error {
+	deleteAccepted := false
+	for {
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("reconcile deletion of instance %s: %w", instanceID, err)
+		}
+
+		if !deleteAccepted {
+			response, err := p.ecsClient.DeleteInstance(&ecs.DeleteInstanceRequest{
+				InstanceId: tea.String(instanceID),
+				Force:      tea.Bool(true),
+			})
+			switch {
+			case err == nil:
+				deleteAccepted = true
+			case isAlibabaInstanceNotFoundError(err):
+				return nil
+			case isRetryableAlibabaInstanceDeleteError(err):
+				logger.Printf("DeleteInstance outcome for %s is retryable or unknown: %v", instanceID, err)
+			default:
+				return fmt.Errorf("delete Alibaba Cloud instance %s (response %v): %w", instanceID, response, err)
+			}
+		}
+
+		_, err := p.ecsClient.DescribeInstanceAttribute(&ecs.DescribeInstanceAttributeRequest{
+			InstanceId: tea.String(instanceID),
+		})
+		switch {
+		case err == nil:
+		case isAlibabaInstanceNotFoundError(err):
+			return nil
+		case isAmbiguousAlibabaCloudError(err) || isIncorrectAlibabaInstanceStatusError(err):
+			logger.Printf("DescribeInstanceAttribute outcome for deleting instance %s is retryable: %v", instanceID, err)
+		default:
+			return fmt.Errorf("describe deleting Alibaba Cloud instance %s: %w", instanceID, err)
+		}
+
+		if err := waitForAlibabaCleanupPoll(ctx); err != nil {
+			return fmt.Errorf("reconcile deletion of instance %s: %w", instanceID, err)
+		}
+	}
+}
+
+func (p *alibabaCloudProvider) validateInstanceRetainedDiskSafety(ctx context.Context, instanceID string) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	response, err := p.ecsClient.DescribeInstanceAttribute(&ecs.DescribeInstanceAttributeRequest{
+		InstanceId: tea.String(instanceID),
+	})
+	if isAlibabaInstanceNotFoundError(err) {
+		return true, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("describe Alibaba Cloud instance %s before retained-disk deletion: %w", instanceID, err)
+	}
+	if response == nil || response.Body == nil {
+		return false, fmt.Errorf("describe Alibaba Cloud instance %s before retained-disk deletion returned an incomplete response", instanceID)
+	}
+	if response.Body.OperationLocks == nil {
+		return false, nil
+	}
+	for _, lock := range response.Body.OperationLocks.LockReason {
+		if lock == nil {
+			return false, fmt.Errorf("instance %s returned an unrecognized operation lock", instanceID)
+		}
+		switch reason := tea.StringValue(lock.LockReason); reason {
+		case "security":
+			return false, fmt.Errorf("refusing to delete security-locked instance %s because Alibaba Cloud would ignore DeleteWithInstance=false", instanceID)
+		case "financial", "Recycling", "dedicatedhostfinancial", "refunded":
+		default:
+			return false, fmt.Errorf("instance %s returned unrecognized operation lock %q", instanceID, reason)
+		}
+	}
+	return false, nil
+}
+
+func isAlibabaInstanceNotFoundError(err error) bool {
+	var sdkErr *tea.SDKError
+	return errors.As(err, &sdkErr) && tea.StringValue(sdkErr.Code) == "InvalidInstanceId.NotFound"
+}
+
+func isIncorrectAlibabaInstanceStatusError(err error) bool {
+	var sdkErr *tea.SDKError
+	if !errors.As(err, &sdkErr) {
+		return false
+	}
+	code := tea.StringValue(sdkErr.Code)
+	return code == "IncorrectInstanceStatus" || strings.HasPrefix(code, "IncorrectInstanceStatus.")
+}
+
+func isRetryableAlibabaInstanceDeleteError(err error) bool {
+	if isIncorrectAlibabaInstanceStatusError(err) || isAmbiguousAlibabaCloudError(err) {
+		return true
+	}
+	var sdkErr *tea.SDKError
+	if !errors.As(err, &sdkErr) {
+		return false
+	}
+	// Alibaba documents this dependency as an in-progress SLB transition. Do
+	// not retry other DependencyViolation errors that require operator action.
+	return tea.StringValue(sdkErr.Code) == "DependencyViolation.SLBConfiguring"
+}
+
+func waitForAlibabaCleanupPoll(ctx context.Context) error {
+	timer := time.NewTimer(instanceCleanupPollInterval)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 func (p *alibabaCloudProvider) Teardown() error {
